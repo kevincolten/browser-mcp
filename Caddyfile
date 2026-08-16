@@ -1,0 +1,49 @@
+{
+	admin off
+	auto_https off
+}
+
+:8080 {
+	log {
+		output stdout
+		format console
+	}
+
+	# ---------------------------------------------------------------------
+	# Token gate.
+	#
+	# Accepts EITHER:
+	#   Authorization: Bearer <MCP_TOKEN>      (preferred)
+	#   ?token=<MCP_TOKEN>                     (fallback for clients that
+	#                                           can't set custom headers)
+	#
+	# This is defense-in-depth. Put Cloudflare Access in front of the tunnel
+	# as the real front door -- see README.
+	# ---------------------------------------------------------------------
+	@unauthorized {
+		not header Authorization "Bearer {env.MCP_TOKEN}"
+		not query token={env.MCP_TOKEN}
+	}
+	handle @unauthorized {
+		respond "401 unauthorized" 401
+	}
+
+	handle /healthz {
+		respond "ok" 200
+	}
+
+	handle /mcp* {
+		reverse_proxy browser:8931 {
+			# Streamable HTTP / SSE must not be buffered.
+			flush_interval -1
+			transport http {
+				read_timeout 0
+				write_timeout 0
+			}
+		}
+	}
+
+	handle {
+		respond "browser-mcp. endpoints: /mcp  /healthz" 404
+	}
+}

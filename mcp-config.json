@@ -1,0 +1,12 @@
+{
+  "browser": {
+    "browserName": "chromium",
+    "cdpEndpoint": "http://127.0.0.1:9222"
+  },
+  "capabilities": ["core", "tabs", "pdf", "install"],
+  "network": {
+    "blockedOrigins": []
+  },
+  "outputDir": "/data/output",
+  "imageResponses": "allow"
+}

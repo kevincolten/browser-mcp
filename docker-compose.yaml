@@ -1,0 +1,54 @@
+services:
+  browser:
+    build:
+      context: .
+      args:
+        PLAYWRIGHT_MCP_VERSION: ${PLAYWRIGHT_MCP_VERSION:-latest}
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ:-America/Los_Angeles}
+      DISPLAY: ":99"
+      SCREEN_WIDTH: ${SCREEN_WIDTH:-1920}
+      SCREEN_HEIGHT: ${SCREEN_HEIGHT:-1080}
+      CDP_PORT: "9222"
+      MCP_PORT: "8931"
+      CHROME_PROFILE_DIR: /data/chrome-profile
+      CHROME_ENABLE_SANDBOX: ${CHROME_ENABLE_SANDBOX:-false}
+      CHROME_EXTRA_ARGS: ${CHROME_EXTRA_ARGS:-}
+    volumes:
+      - chrome-profile:/data
+    # Chrome will exhaust the default 64MB /dev/shm on media-heavy pages.
+    shm_size: "2gb"
+    ports:
+      # noVNC. Bound to loopback ONLY -- reach it over Tailscale, never
+      # over the public tunnel. See README "First login".
+      - "127.0.0.1:6080:6080"
+    networks: [browser-net]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9222/json/version >/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 3
+
+  gateway:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - browser
+    environment:
+      MCP_TOKEN: ${MCP_TOKEN:?MCP_TOKEN must be set}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+    ports:
+      - "${GATEWAY_PORT:-8080}:8080"
+    networks: [browser-net]
+
+networks:
+  browser-net:
+    driver: bridge
+
+volumes:
+  chrome-profile:
+  caddy-data:
