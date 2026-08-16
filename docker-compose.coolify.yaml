@@ -1,0 +1,52 @@
+# Coolify service compose.
+#
+# This is the variant actually deployed on Coolify -- it differs from the
+# root docker-compose.yaml in two ways:
+#
+#   1. It pulls a prebuilt image from GHCR instead of building locally.
+#   2. Auth is handled by mcp-auth-proxy (which speaks the OAuth flow Claude
+#      Web expects) rather than the Caddy bearer-token gate. The Caddy
+#      gateway is still the right answer for standalone/local use.
+#
+# Secrets come from Coolify env vars: PASSWORD, TUNNEL_TOKEN.
+
+services:
+  browser:
+    image: 'ghcr.io/kevincolten/browser-mcp:latest'
+    restart: unless-stopped
+    # Chrome exhausts the default 64MB /dev/shm on media-heavy pages.
+    shm_size: '2gb'
+    environment:
+      - 'TZ=${TZ:-America/Los_Angeles}'
+      - 'SCREEN_WIDTH=1920'
+      - 'SCREEN_HEIGHT=1080'
+      - 'CHROME_EXTRA_ARGS=${CHROME_EXTRA_ARGS:-}'
+    volumes:
+      - 'chrome-profile:/data'
+    ports:
+      # noVNC, loopback only. Reach it over Tailscale for the one-time login.
+      # Never route this through the tunnel -- it has no password.
+      - '127.0.0.1:6080:6080'
+
+  authproxy:
+    image: 'ghcr.io/sigbit/mcp-auth-proxy:v2.10.2'
+    restart: unless-stopped
+    environment:
+      - 'EXTERNAL_URL=https://browser-mcp.kevincolten.com'
+      - NO_AUTO_TLS=true
+      - 'PASSWORD=${PASSWORD:?"PASSWORD missing"}'
+    # playwright-mcp serves Streamable HTTP at /mcp on 8931.
+    command: 'http://browser:8931/mcp'
+    volumes:
+      - 'data:/data'
+
+  cloudflared:
+    image: 'cloudflare/cloudflared:latest'
+    restart: unless-stopped
+    command: 'tunnel --no-autoupdate run'
+    environment:
+      - 'TUNNEL_TOKEN=${TUNNEL_TOKEN:?"TUNNEL_TOKEN missing"}'
+
+volumes:
+  chrome-profile: null
+  data: null
