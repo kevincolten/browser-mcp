@@ -17,10 +17,9 @@ for _ in $(seq 1 120); do
   sleep 1
 done
 
-# --host 0.0.0.0 so the gateway container (and your tailnet) can reach it.
-# This port is NOT published to the internet by docker-compose; the Caddy
-# gateway is the only public entrypoint. See README.
-exec mcp-server-playwright \
+# NOTE: the bin shipped by @playwright/mcp is `playwright-mcp` (cli.js).
+# It is NOT `mcp-server-playwright` -- that name silently restart-loops.
+exec playwright-mcp \
   --config /app/mcp-config.json \
   --port "${MCP_PORT}" \
   --host 0.0.0.0

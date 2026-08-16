@@ -52,7 +52,9 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
 # Pin the MCP server so a bad upstream release can't break your deploy.
 ARG PLAYWRIGHT_MCP_VERSION=latest
 RUN npm install -g @playwright/mcp@${PLAYWRIGHT_MCP_VERSION} \
-    && npm cache clean --force
+    && npm cache clean --force \
+    # Fail the build loudly if the bin name ever changes again.
+    && command -v playwright-mcp
 
 WORKDIR /app
 COPY scripts/ /app/scripts/
@@ -64,10 +66,13 @@ RUN chmod +x /app/scripts/*.sh
 VOLUME ["/data"]
 
 # 8931 = MCP (streamable HTTP)   6080 = noVNC
-# Neither is published to the host in compose; the gateway/tailnet reaches them.
 EXPOSE 8931 6080
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
-  CMD curl -fsS http://127.0.0.1:9222/json/version >/dev/null || exit 1
+# Probe BOTH Chrome's CDP and the MCP listener. Checking only CDP hides a dead
+# MCP process behind a green healthcheck -- which is exactly what happened.
+# curl without -f returns 0 on 4xx, so any HTTP reply on 8931 counts as alive;
+# connection-refused exits non-zero.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+  CMD sh -c 'curl -fsS --max-time 5 http://127.0.0.1:9222/json/version >/dev/null && curl -s -o /dev/null --max-time 5 http://127.0.0.1:8931/mcp'
 
 CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/supervisord.conf"]
