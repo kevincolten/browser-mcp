@@ -3,10 +3,15 @@
     "browserName": "chromium",
     "cdpEndpoint": "http://127.0.0.1:9222"
   },
-  "capabilities": ["core", "tabs", "pdf", "install"],
+  "capabilities": ["core", "tabs", "pdf"],
+  "timeouts": {
+    "action": 30000,
+    "navigation": 60000,
+    "expect": 30000,
+    "settle": 2000
+  },
   "network": {
     "blockedOrigins": []
   },
-  "outputDir": "/data/output",
   "imageResponses": "allow"
 }
