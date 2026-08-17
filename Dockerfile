@@ -13,6 +13,37 @@ ENV DEBIAN_FRONTEND=noninteractive \
     CHROME_PROFILE_DIR=/data/chrome-profile
 
 # ---------------------------------------------------------------------------
+# THE 5-SECOND CLIFF -- read this before changing anything below.
+#
+# playwright-mcp's Streamable HTTP endpoint (/mcp) runs a heartbeat: it pings
+# the client every 3s and calls server.close() if a ping goes unanswered for
+# 5000ms. Closing deletes the session, drops the shared CDP connection, and
+# kills any in-flight tool call with the wildly misleading:
+#     "Target page, context or browser has been closed"
+# ...at ~5.1s, on any page, regardless of what is loading.
+#
+# Server->client pings ride the SSE stream. Clients that don't answer them
+# (Claude's connector, and curl, which cannot) hit this on every call over 5s.
+# Light pages finish under the limit and appear to work, which makes this look
+# like a connectivity or page problem for a very long time.
+#
+# Upstream gates it on PLAYWRIGHT_MCP_PING_TIMEOUT_MS and startHeartbeat()
+# returns early when the value is <= 0, so 0 disables it outright. From
+# playwright-core/lib/coreBundle.js:
+#     defaultPingTimeout = 5e3;
+#     pingTimeout = () => { const v = process.env.PLAYWRIGHT_MCP_PING_TIMEOUT_MS; ... }
+#     startHeartbeat = (server) => { const timeout = pingTimeout();
+#                                    if (timeout <= 0) return; ... }
+#
+# The legacy /sse endpoint passes runHeartbeat=false and never had this issue,
+# but /sse is the deprecated transport, so we stay on /mcp and kill the ping.
+#
+# Cost: dead sessions are no longer reaped by ping, only on transport close.
+# Negligible for a single-user deployment.
+# ---------------------------------------------------------------------------
+ENV PLAYWRIGHT_MCP_PING_TIMEOUT_MS=0
+
+# ---------------------------------------------------------------------------
 # Base packages
 #   - xvfb / x11vnc / novnc : headed browser on a virtual display, viewable
 #   - fonts-*               : missing fonts are a fingerprinting tell
@@ -33,6 +64,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Real Google Chrome (stable) -- NOT Chromium.
 # Chromium's UA, codec set and branding differ from Chrome and are trivially
 # fingerprinted. Using the genuine stable build removes that entire class.
+# Also: do NOT let Playwright launch the browser -- it sets navigator.webdriver
+# and the automation switches. We launch Chrome ourselves and attach over CDP.
 # ---------------------------------------------------------------------------
 RUN curl -fsSL https://dl.google.com/linux/linux_signing_key.pub \
       | gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg \
@@ -52,45 +85,9 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
 ARG PLAYWRIGHT_MCP_VERSION=latest
 RUN npm install -g @playwright/mcp@${PLAYWRIGHT_MCP_VERSION} \
     && npm cache clean --force \
-    # Fail the build loudly if the bin name ever changes.
-    && command -v playwright-mcp
-
-# ---------------------------------------------------------------------------
-# PATCH: disable the heartbeat on the Streamable HTTP (/mcp) handler.
-#
-# playwright/lib/mcp/sdk/http.js has two handlers that differ by one boolean:
-#
-#   handleSSE        -> mcpServer.connect(factory, transport, false)  // no ping
-#   handleStreamable -> mcpServer.connect(factory, transport, true)   // ping
-#
-# With the flag on, sdk/server.js startHeartbeat() pings the client every 3s
-# and calls server.close() if a ping goes unanswered for 5000ms. That deletes
-# the session, drops the shared CDP connection, and kills any in-flight tool
-# call with the wildly misleading:
-#     "Target page, context or browser has been closed"
-# at ~5.1s, for ANY page, regardless of what is loading.
-#
-# Server->client pings ride the standalone GET SSE stream. Clients that don't
-# open that stream never answer, so every call over 5s dies. Verified: an SDK
-# client (which does answer) ran an 11.8s call through the full tunnel + auth
-# proxy on /mcp without trouble; Claude's connector died at 5.1s on the same
-# path. So the transport is fine and only the ping handling differs.
-#
-# Flipping this to false matches what /sse already does, while keeping the
-# modern Streamable HTTP endpoint. Cost: dead sessions are no longer reaped by
-# ping, only on transport close -- negligible for a single-user deployment.
-#
-# The greps make the build fail if upstream restructures this, rather than
-# silently shipping an unpatched image.
-# ---------------------------------------------------------------------------
-RUN set -eux; \
-    f="$(find /usr/lib/node_modules /usr/local/lib/node_modules \
-         -path '*/playwright/lib/mcp/sdk/http.js' 2>/dev/null | head -1)"; \
-    test -n "$f"; \
-    grep -q 'transport, true' "$f"; \
-    sed -i 's/transport, true)/transport, false)/g' "$f"; \
-    ! grep -q 'transport, true' "$f"; \
-    echo "patched heartbeat off in $f"
+    && command -v playwright-mcp \
+    && grep -rq PLAYWRIGHT_MCP_PING_TIMEOUT_MS /usr/lib/node_modules \
+    && echo 'ping-timeout env var present'
 
 WORKDIR /app
 COPY scripts/ /app/scripts/
