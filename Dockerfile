@@ -49,12 +49,48 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
-# Pin the MCP server so a bad upstream release can't break your deploy.
 ARG PLAYWRIGHT_MCP_VERSION=latest
 RUN npm install -g @playwright/mcp@${PLAYWRIGHT_MCP_VERSION} \
     && npm cache clean --force \
-    # Fail the build loudly if the bin name ever changes again.
+    # Fail the build loudly if the bin name ever changes.
     && command -v playwright-mcp
+
+# ---------------------------------------------------------------------------
+# PATCH: disable the heartbeat on the Streamable HTTP (/mcp) handler.
+#
+# playwright/lib/mcp/sdk/http.js has two handlers that differ by one boolean:
+#
+#   handleSSE        -> mcpServer.connect(factory, transport, false)  // no ping
+#   handleStreamable -> mcpServer.connect(factory, transport, true)   // ping
+#
+# With the flag on, sdk/server.js startHeartbeat() pings the client every 3s
+# and calls server.close() if a ping goes unanswered for 5000ms. That deletes
+# the session, drops the shared CDP connection, and kills any in-flight tool
+# call with the wildly misleading:
+#     "Target page, context or browser has been closed"
+# at ~5.1s, for ANY page, regardless of what is loading.
+#
+# Server->client pings ride the standalone GET SSE stream. Clients that don't
+# open that stream never answer, so every call over 5s dies. Verified: an SDK
+# client (which does answer) ran an 11.8s call through the full tunnel + auth
+# proxy on /mcp without trouble; Claude's connector died at 5.1s on the same
+# path. So the transport is fine and only the ping handling differs.
+#
+# Flipping this to false matches what /sse already does, while keeping the
+# modern Streamable HTTP endpoint. Cost: dead sessions are no longer reaped by
+# ping, only on transport close -- negligible for a single-user deployment.
+#
+# The greps make the build fail if upstream restructures this, rather than
+# silently shipping an unpatched image.
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    f="$(find /usr/lib/node_modules /usr/local/lib/node_modules \
+         -path '*/playwright/lib/mcp/sdk/http.js' 2>/dev/null | head -1)"; \
+    test -n "$f"; \
+    grep -q 'transport, true' "$f"; \
+    sed -i 's/transport, true)/transport, false)/g' "$f"; \
+    ! grep -q 'transport, true' "$f"; \
+    echo "patched heartbeat off in $f"
 
 WORKDIR /app
 COPY scripts/ /app/scripts/
@@ -70,8 +106,6 @@ EXPOSE 8931 6080
 
 # Probe BOTH Chrome's CDP and the MCP listener. Checking only CDP hides a dead
 # MCP process behind a green healthcheck -- which is exactly what happened.
-# curl without -f returns 0 on 4xx, so any HTTP reply on 8931 counts as alive;
-# connection-refused exits non-zero.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
   CMD sh -c 'curl -fsS --max-time 5 http://127.0.0.1:9222/json/version >/dev/null && curl -s -o /dev/null --max-time 5 http://127.0.0.1:8931/mcp'
 
