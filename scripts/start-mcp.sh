@@ -30,9 +30,18 @@ done
 
 # NOTE: the bin shipped by @playwright/mcp is `playwright-mcp` (cli.js).
 # It is NOT `mcp-server-playwright` -- that name silently restart-loops.
+#
+# --shared-browser-context is REQUIRED in CDP mode. Without it playwright-mcp
+# attaches to Chrome per HTTP session and disconnects on session teardown --
+# but the CDP connection is shared, so one session ending kills any other
+# session's in-flight call with:
+#   "Target page, context or browser has been closed"
+# Clients routinely hold more than one session open, so this is not an edge
+# case; it fires the moment two tool calls overlap.
 echo "[mcp] starting on :${MCP_PORT} (allowed-hosts=${ALLOWED_HOSTS})"
 exec playwright-mcp \
   --config /app/mcp-config.json \
   --port "${MCP_PORT}" \
   --host 0.0.0.0 \
-  --allowed-hosts "${ALLOWED_HOSTS}"
+  --allowed-hosts "${ALLOWED_HOSTS}" \
+  --shared-browser-context
