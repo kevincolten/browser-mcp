@@ -15,9 +15,24 @@ MCP_PORT="${MCP_PORT:-8931}"
 # the proxy and looks exactly like an authorization failure, which it isn't.
 #
 # '*' is safe in this deployment: 8931 is never published to the host and is
-# only reachable from the auth proxy on the internal compose network. Narrow
-# it to your FQDN if you expose the port some other way.
+# only reachable from the auth proxy on the internal compose network.
 ALLOWED_HOSTS="${MCP_ALLOWED_HOSTS:-*}"
+
+# THE 5-SECOND CLIFF.
+#
+# --timeout-action defaults to 5000ms and covers post-navigation work: the
+# accessibility snapshot, console capture, settle waits. Navigation itself has
+# its own (60s) budget and usually finishes fast, so a page loads fine and then
+# the snapshot blows the action budget. The server hangs up mid-request; the
+# transport reaps the session, which closes the shared CDP connection, and the
+# in-flight call dies with the extremely misleading:
+#   "Target page, context or browser has been closed"
+#
+# Light pages (example.com, ~1.5s) sail under the limit. Real-world pages with
+# trackers and third-party scripts never settle and hit it every time -- so the
+# server looks broken for exactly the pages you actually want to read.
+TIMEOUT_ACTION="${MCP_TIMEOUT_ACTION:-30000}"
+TIMEOUT_NAVIGATION="${MCP_TIMEOUT_NAVIGATION:-60000}"
 
 echo "[mcp] waiting for Chrome CDP on 127.0.0.1:${CDP_PORT} ..."
 for _ in $(seq 1 120); do
@@ -31,17 +46,15 @@ done
 # NOTE: the bin shipped by @playwright/mcp is `playwright-mcp` (cli.js).
 # It is NOT `mcp-server-playwright` -- that name silently restart-loops.
 #
-# --shared-browser-context is REQUIRED in CDP mode. Without it playwright-mcp
-# attaches to Chrome per HTTP session and disconnects on session teardown --
-# but the CDP connection is shared, so one session ending kills any other
-# session's in-flight call with:
-#   "Target page, context or browser has been closed"
-# Clients routinely hold more than one session open, so this is not an edge
-# case; it fires the moment two tool calls overlap.
-echo "[mcp] starting on :${MCP_PORT} (allowed-hosts=${ALLOWED_HOSTS})"
+# --shared-browser-context: in CDP mode the browser connection is shared, so
+# per-session attach/detach lets one session's teardown kill another's
+# in-flight call.
+echo "[mcp] starting on :${MCP_PORT} (allowed-hosts=${ALLOWED_HOSTS} action-timeout=${TIMEOUT_ACTION}ms)"
 exec playwright-mcp \
   --config /app/mcp-config.json \
   --port "${MCP_PORT}" \
   --host 0.0.0.0 \
   --allowed-hosts "${ALLOWED_HOSTS}" \
-  --shared-browser-context
+  --shared-browser-context \
+  --timeout-action "${TIMEOUT_ACTION}" \
+  --timeout-navigation "${TIMEOUT_NAVIGATION}"
