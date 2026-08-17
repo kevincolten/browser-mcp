@@ -1,14 +1,37 @@
 # Coolify service compose.
 #
-# This is the variant actually deployed on Coolify -- it differs from the
-# root docker-compose.yaml in two ways:
-#
-#   1. It pulls a prebuilt image from GHCR instead of building locally.
-#   2. Auth is handled by mcp-auth-proxy (which speaks the OAuth flow Claude
-#      Web expects) rather than the Caddy bearer-token gate. The Caddy
-#      gateway is still the right answer for standalone/local use.
+# Differs from the root docker-compose.yaml in two ways:
+#   1. Pulls a prebuilt image from GHCR instead of building locally.
+#   2. Auth is mcp-auth-proxy (OAuth, which Claude Web expects) rather than
+#      the Caddy bearer-token gate. Caddy remains right for local use.
 #
 # Secrets come from Coolify env vars: PASSWORD, TUNNEL_TOKEN.
+#
+# ---------------------------------------------------------------------------
+# WHY THE BACKEND IS /sse AND NOT /mcp
+#
+# playwright-mcp's Streamable HTTP endpoint (/mcp) runs a heartbeat:
+#
+#   Promise.race([ server.ping(),
+#                  timeout(5000, "ping timeout") ])
+#     .catch(() => server.close())
+#
+# (playwright/lib/mcp/sdk/server.js -> startHeartbeat). Server->client pings
+# travel on the SSE stream. If that stream doesn't round-trip cleanly through
+# a reverse proxy, no ping is answered, the server calls close(), the session
+# is deleted, the shared CDP connection drops, and any in-flight tool call
+# dies with the very misleading:
+#   "Target page, context or browser has been closed"
+# ...at almost exactly 5 seconds, for any page, regardless of what's loading.
+#
+# The legacy /sse handler passes runHeartbeat=false (see handleSSE in
+# sdk/http.js), so it has no ping and no 5s ceiling. mcp-auth-proxy forwards
+# the backend's original path, so the public endpoint becomes /sse too.
+#
+# NOTE: a direct curl against /mcp will ALWAYS fail past 5s -- curl is not an
+# MCP client and cannot answer a ping. Do not use curl to judge backend health
+# on long calls; use a real SDK client.
+# ---------------------------------------------------------------------------
 
 services:
   browser:
@@ -20,13 +43,13 @@ services:
       - 'TZ=${TZ:-America/Los_Angeles}'
       - 'SCREEN_WIDTH=1920'
       - 'SCREEN_HEIGHT=1080'
-      - 'CHROME_EXTRA_ARGS=${CHROME_EXTRA_ARGS:-}'
+      - 'DEBUG=${DEBUG:-}'
     volumes:
       - 'chrome-profile:/data'
     ports:
-      # noVNC, loopback only. Reach it over Tailscale for the one-time login.
-      # Never route this through the tunnel -- it has no password.
+      # noVNC + MCP, loopback only. Reach over Tailscale; never tunnel these.
       - '127.0.0.1:6080:6080'
+      - '127.0.0.1:8931:8931'
 
   authproxy:
     image: 'ghcr.io/sigbit/mcp-auth-proxy:v2.10.2'
@@ -35,8 +58,7 @@ services:
       - 'EXTERNAL_URL=https://browser-mcp.kevincolten.com'
       - NO_AUTO_TLS=true
       - 'PASSWORD=${PASSWORD:?"PASSWORD missing"}'
-    # playwright-mcp serves Streamable HTTP at /mcp on 8931.
-    command: 'http://browser:8931/mcp'
+    command: 'http://browser:8931/sse'
     volumes:
       - 'data:/data'
 
